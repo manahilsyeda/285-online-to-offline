@@ -55,6 +55,7 @@ def build_mlp(
     for _ in range(n_layers):
         layers.append(nn.Linear(in_size, size))
         # TODO(student): Add layer norm
+        layers.append(nn.LayerNorm(size))
         layers.append(activation)
         in_size = size
     layers.append(nn.Linear(in_size, output_size))
@@ -103,6 +104,7 @@ def build_ensemble_mlp(
         for _ in range(n_layers):
             layers.append(nn.Linear(in_size, size))
             # TODO(student): Add layer norm
+            layers.append(nn.LayerNorm(size))
             layers.append(activation.__class__())   # fresh module per layer
             in_size = size
         layers.append(nn.Linear(in_size, output_size))
