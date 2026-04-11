@@ -93,10 +93,10 @@ def run_offline_training_loop(
             step,
         )
 
-        if step % args.log_interval == 0:
+        if (step + 1) % args.log_interval == 0:
             train_logger.log(metrics, step=global_step)
 
-        if step % args.eval_interval == 0:
+        if (step + 1) % args.eval_interval == 0:
             trajectories = utils.sample_n_trajectories(
                 eval_env,
                 agent,
@@ -185,7 +185,7 @@ def run_online_training_loop(
                 batch["dones"],
                 step,
             )
-            if step % args.log_interval == 0:
+            if (step + 1) % args.log_interval == 0:
                 train_logger.log(metrics, step=global_step)
 
         action = agent.get_action(obs)
@@ -202,7 +202,7 @@ def run_online_training_loop(
         if done:
             obs, _ = env.reset()
 
-        if step % args.eval_interval == 0:
+        if (step + 1) % args.eval_interval == 0:
             trajectories = utils.sample_n_trajectories(
                 eval_env,
                 agent,
