@@ -171,7 +171,7 @@ def run_online_training_loop(
     eval_env, _ = config["make_env_and_dataset"]()
     eval_ep_len = eval_env.spec.max_episode_steps or eval_env.max_episode_steps
 
-    for step in tqdm.trange(online_steps + 1, dynamic_ncols=True):
+    for step in tqdm.trange(online_steps, dynamic_ncols=True):
         global_step = start_step + step
 
         if replay_buffer.size >= config["batch_size"]:
