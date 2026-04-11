@@ -1,5 +1,3 @@
-import time
-import argparse
 from pathlib import Path
 
 import modal
@@ -10,7 +8,7 @@ from scripts.train_offline_online import main, setup_arguments
 APP_NAME = "offline-to-online-project"
 NETRC_PATH = Path("~/.netrc").expanduser()
 PROJECT_DIR = "/root/project"
-VOLUME_PATH = "/root/exp"
+VOLUME_PATH = "/vol"
 DEFAULT_GPU = "T4"
 DEFAULT_CPU = 2.0
 DEFAULT_MEMORY = 4096  # MB
@@ -44,8 +42,8 @@ def load_gitignore_patterns() -> list[str]:
 
 # Build a container image with the project's dependencies using uv.
 image = modal.Image.debian_slim().apt_install("libgl1", "libglib2.0-0").uv_sync()
-# Download OGBench datasets.
-image = image.run_commands("python -c \"import ogbench;ogbench.download_datasets(['cube-single-play-v0', 'cube-double-play-v0','antsoccer-arena-navigate-v0'])\"")
+# Datasets are downloaded at runtime by ogbench (~3s); no need to bake them
+# into the image (which would be invalidated on every dep change).
 # Copy .netrc for wandb logging.
 if NETRC_PATH.is_file():
     image = image.add_local_file(
@@ -68,12 +66,30 @@ env = {
 
 @app.function(volumes={VOLUME_PATH: volume}, timeout=60 * 60 * 12, env=env, image=image, gpu=DEFAULT_GPU, cpu=DEFAULT_CPU, memory=DEFAULT_MEMORY)
 def offline_to_online_modal_remote(*args: str) -> None:
-    args = setup_arguments(args)
-    if args.njobs is not None and len(args.job_specs) > 0:
-        # Run n jobs in parallel
+    import os
+    # Run from the volume root so relative outputs (exp/<run_group>/...) land on the volume.
+    os.chdir(VOLUME_PATH)
+    parsed_args = setup_arguments(args)
+    if parsed_args.njobs is not None and len(parsed_args.job_specs) > 0:
         from scripts.run_njobs import main_njobs
-        main_njobs(job_specs=args.job_specs, njobs=args.njobs)
+        main_njobs(job_specs=parsed_args.job_specs, njobs=parsed_args.njobs)
     else:
-        # Run a single job
-        main(args)
+        main(parsed_args)
     volume.commit()
+
+
+@app.local_entrypoint()
+def entrypoint(*args: str) -> None:
+    """Forward CLI args to the remote training function.
+
+    Example:
+        uv run modal run src/scripts/modal_run.py -- \\
+            --run_group=s1_fql \\
+            --base_config=fql \\
+            --env_name=cube-single-play-singletask-task1-v0 \\
+            --seed=42 \\
+            --alpha=30 \\
+            --offline_training_steps=500000 \\
+            --online_training_steps=100000
+    """
+    offline_to_online_modal_remote.remote(*args)
