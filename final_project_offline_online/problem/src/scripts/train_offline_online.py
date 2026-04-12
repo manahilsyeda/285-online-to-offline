@@ -334,8 +334,8 @@ def main(args):
             start_step=start_step,
         )
 
-    # if agent is not None:
-    #     dump_log(agent, train_logger, eval_logger, config, args.save_dir)
+    if agent is not None:
+        dump_log(agent, train_logger, eval_logger, config, args.save_dir)
 
 
 if __name__ == "__main__":
