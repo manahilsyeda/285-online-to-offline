@@ -47,7 +47,7 @@ def run_offline_training_loop(
     eval_logger: Logger,
     args: argparse.Namespace,
     start_step: int = 0,
-) -> Tuple[str, ReplayBuffer, nn.Module]:
+) -> Tuple[str, nn.Module]:
     """
     Offline RL: sample transitions from the offline dataset (via a replay buffer), update the agent,
     and log/evaluate on the same global step axis as the later online phase.
@@ -60,9 +60,8 @@ def run_offline_training_loop(
     ptu.init_gpu(use_gpu=not args.no_gpu, gpu_id=args.which_gpu)
 
     _, offline_dataset = config["make_env_and_dataset"]()
-    replay_buffer = replay_buffer_from_offline(offline_dataset, args.replay_buffer_capacity)
 
-    example_batch = replay_buffer.sample(1)
+    example_batch = offline_dataset.sample(1)
     agent_cls = agents[config["agent"]]
     agent_kwargs = dict(config["agent_kwargs"])
     if config["agent"] in ("ifql", "dsrl"):
@@ -81,7 +80,7 @@ def run_offline_training_loop(
 
     for step in tqdm.trange(offline_steps, dynamic_ncols=True):
         global_step = start_step + step
-        batch = replay_buffer.sample(config["batch_size"])
+        batch = offline_dataset.sample(config["batch_size"])
         batch = {k: ptu.from_numpy(v) if isinstance(v, np.ndarray) else v for k, v in batch.items()}
 
         metrics = agent.update(
@@ -111,7 +110,7 @@ def run_offline_training_loop(
 
     agent_path = os.path.join(args.save_dir, "agent.pt")
     torch.save(agent.state_dict(), agent_path)
-    return agent_path, replay_buffer, agent
+    return agent_path, agent
 
 
 def run_online_training_loop(
@@ -135,10 +134,9 @@ def run_online_training_loop(
     ptu.init_gpu(use_gpu=not args.no_gpu, gpu_id=args.which_gpu)
 
     env, offline_dataset = config["make_env_and_dataset"]()
-    if replay_buffer is None:
-        replay_buffer = replay_buffer_from_offline(offline_dataset, args.replay_buffer_capacity)
+    replay_buffer = ReplayBuffer(capacity=args.replay_buffer_capacity)
 
-    example_batch = replay_buffer.sample(1)
+    example_batch = offline_dataset.sample(1)
     agent_cls = agents[config["agent"]]
     agent_kwargs = dict(config["agent_kwargs"])
     if config["agent"] in ("ifql", "dsrl"):
@@ -164,7 +162,6 @@ def run_online_training_loop(
             state = torch.load(agent_path, map_location=ptu.device)
             agent.load_state_dict(state)
 
-    ep_len = env.spec.max_episode_steps or env.max_episode_steps
     online_steps = config["online_training_steps"]
     obs, _ = env.reset()
 
@@ -189,7 +186,7 @@ def run_online_training_loop(
                 train_logger.log(metrics, step=global_step)
 
         action = agent.get_action(obs)
-        next_obs, reward, terminated, truncated, info = env.step(action)
+        next_obs, reward, terminated, truncated, _ = env.step(action)
         done = bool(terminated or truncated)
         replay_buffer.insert(
             observation=obs,
@@ -308,34 +305,33 @@ def main(args):
 
     start_step = 0
     agent_path: Optional[str] = None
-    replay_buffer: Optional[ReplayBuffer] = None
     agent: Optional[nn.Module] = None
 
     if args.offline_training_steps > 0:
         print(f"Running offline training loop with {args.offline_training_steps} steps")
         # TODO(student): Implement offline training loop
         # Hint: You might consider passing the agent's path to the online training loop
-        agent_path, replay_buffer, agent = run_offline_training_loop(
+        agent_path, agent = run_offline_training_loop(
             config, train_logger, eval_logger, args, start_step=start_step
         )
         start_step = args.offline_training_steps
-    
+
     if args.online_training_steps > 0:
         print(f"Running online training loop with {args.online_training_steps} steps")
-         # TODO(student): Implement online training loop
+        # TODO(student): Implement online training loop
         agent = run_online_training_loop(
             config,
             train_logger,
             eval_logger,
             args,
             agent_path=agent_path,
-            replay_buffer=replay_buffer,
+            replay_buffer=None,
             agent=agent,
             start_step=start_step,
         )
 
-    # if agent is not None:
-    #     dump_log(agent, train_logger, eval_logger, config, args.save_dir)
+    if agent is not None:
+        dump_log(agent, train_logger, eval_logger, config, args.save_dir)
 
 
 if __name__ == "__main__":
