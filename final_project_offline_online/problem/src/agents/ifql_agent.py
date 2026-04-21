@@ -33,10 +33,19 @@ class IFQLAgent(nn.Module):
         self.action_dim = action_dim
         
         # TODO(student): Create flow actor
+        self.online_training = online_training
+        self.actor_flow = make_actor_flow(observation_shape, action_dim)
 
         # TODO(student): Create critic (ensemble of Q-functions), target critic (ensemble of Q-functions), and value function
+        self.critic = make_critic(observation_shape, action_dim)
+        self.target_critic = make_critic(observation_shape, action_dim)
+        self.target_critic.load_state_dict(self.critic.state_dict())
+        self.value = make_value(observation_shape)
 
         # TODO(student): Create optimizers for all the above models
+        self.actor_flow_optimizer = make_actor_flow_optimizer(self.actor_flow.parameters())
+        self.critic_optimizer = make_critic_optimizer(self.critic.parameters())
+        self.value_optimizer = make_value_optimizer(self.value.parameters())
 
         self.discount = discount
         self.target_update_rate = target_update_rate
@@ -48,9 +57,14 @@ class IFQLAgent(nn.Module):
     def expectile_loss(adv: torch.Tensor, expectile: float) -> torch.Tensor:
         """
         Compute the expectile loss for IFQL
+        adv = V(s) - min_i Q̄_i(s, a)
+        ℓ²_τ(x) = |τ - I(x > 0)| * x²
         """
         # TODO(student): Implement the expectile loss
-        return ...
+        weights = torch.where(adv > 0,
+                              torch.ones_like(adv) * (1 - expectile),
+                              torch.ones_like(adv) * expectile)
+        return (weights * adv.pow(2)).mean()
 
     @torch.compile
     def update_value(
@@ -62,10 +76,23 @@ class IFQLAgent(nn.Module):
         Update value function
         """
         # TODO(student): Implement the value function update
-        
+        with torch.no_grad():
+            q_min = self.target_critic(observations, actions).min(dim=0).values
+
+        v = self.value(observations)
+        adv = v - q_min
+        loss = self.expectile_loss(adv, self.expectile)
+
         # TODO(student): Update value function
-        
-        return ...
+        self.value_optimizer.zero_grad()
+        loss.backward()
+        self.value_optimizer.step()
+
+        return {
+            "value_loss": loss,
+            "value_mean": v.mean(),
+            "adv_mean": adv.mean(),
+        }
 
     @torch.no_grad()
     def sample_actions(self, observations: torch.Tensor) -> torch.Tensor:
@@ -78,15 +105,32 @@ class IFQLAgent(nn.Module):
           3. Pick the action with the highest Q-value.
         """
         # TODO(student): Implement rejection sampling
+        B = observations.shape[0]
+        N = self.num_samples
 
-        return ...
+        obs_exp = observations.unsqueeze(1).expand(-1, N, -1).reshape(B * N, -1)
+        z = torch.randn(B * N, self.action_dim, dtype=observations.dtype, device=observations.device)
+
+        cand_actions = self.get_flow_action(obs_exp, z)  # (B*N, ac_dim)
+
+        qs = self.target_critic(obs_exp, cand_actions)  # (2, B*N)
+        q_min = qs.min(dim=0).values  # (B*N,)
+        q_min = q_min.reshape(B, N)
+
+        best_idx = q_min.argmax(dim=1)  # (B,)
+        cand_actions = cand_actions.reshape(B, N, self.action_dim)
+        best_actions = cand_actions[torch.arange(B, device=observations.device), best_idx]
+
+        return best_actions
 
     def get_action(self, observation: np.ndarray):
         """
         Used for evaluation.
         """
         # TODO(student): Implement get action
-        return ...
+        observation = ptu.from_numpy(np.asarray(observation))[None]
+        action = self.sample_actions(observation)
+        return ptu.to_numpy(action[0])
 
     @torch.compile
     def get_flow_action(self, observation: torch.Tensor, noise: torch.Tensor):
@@ -94,8 +138,18 @@ class IFQLAgent(nn.Module):
         Compute the flow action using Euler integration for `self.flow_steps` steps.
         """
         # TODO(student): Implement euler integration to get flow action
-        
-        return ...
+        action_x = noise
+        dt = 1.0 / self.flow_steps
+        for step in range(self.flow_steps):
+            t = torch.full(
+                (observation.shape[0], 1),
+                step * dt,
+                device=observation.device,
+                dtype=observation.dtype,
+            )
+            v = self.actor_flow(observation, action_x, t)
+            action_x = action_x + dt * v
+        return torch.clamp(action_x, -1, 1)
 
     @torch.compile
     def update_q(
@@ -111,11 +165,24 @@ class IFQLAgent(nn.Module):
         as in IFQL / IQL-style critic training.
         """
         # TODO(student): Implement Q-function update
-        
-        # TODO(student): Update Q-function
-        
-        return ...
+        with torch.no_grad():
+            next_v = self.value(next_observations)
+            y = rewards + self.discount * (1 - dones) * next_v
 
+        q = self.critic(observations, actions)  # (2, B)
+        loss = ((q - y.unsqueeze(0)) ** 2).mean()
+
+        # TODO(student): Update Q-function
+        self.critic_optimizer.zero_grad()
+        loss.backward()
+        self.critic_optimizer.step()
+
+        return {
+            "q_loss": loss,
+            "q_mean": q.mean(),
+            "q_max": q.max(),
+            "q_min": q.min(),
+        }
 
     @torch.compile
     def update_actor(
@@ -127,11 +194,21 @@ class IFQLAgent(nn.Module):
         Update the flow actor using the velocity matching loss.
         """
         # TODO(student): Implement flow actor update
-        
-        # TODO(student): Update flow actor
-        
-        return ...
+        z = torch.randn_like(actions)
+        t = torch.rand(actions.shape[0], 1, device=actions.device, dtype=actions.dtype)
+        a_tilde = (1 - t) * z + t * actions
+        v_pred = self.actor_flow(observations, a_tilde, t)
+        target = actions - z
+        loss = (v_pred - target).pow(2).mean(dim=-1).mean()
 
+        # TODO(student): Update flow actor
+        self.actor_flow_optimizer.zero_grad()
+        loss.backward()
+        self.actor_flow_optimizer.step()
+
+        return {
+            "actor_loss": loss,
+        }
 
     def update(
         self,
@@ -157,4 +234,7 @@ class IFQLAgent(nn.Module):
 
     def update_target_critic(self) -> None:
         # TODO(student): Update target_critic using Polyak averaging with self.target_update_rate
-        pass 
+        tau = self.target_update_rate
+        with torch.no_grad():
+            for p, tp in zip(self.critic.parameters(), self.target_critic.parameters()):
+                tp.data.mul_(1 - tau).add_(tau * p.data)
