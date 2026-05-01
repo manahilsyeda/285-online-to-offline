@@ -90,6 +90,7 @@ def setup_arguments(args=None):
 
     parser.add_argument("--expectile", type=float, default=None)
     parser.add_argument("--alpha", type=float, default=None)
+    parser.add_argument("--noise_scale", type=float, default=None)
 
     # For njobs mode (optional)
     parser.add_argument("--njobs", type=int, default=None)
@@ -123,6 +124,9 @@ def main(args):
     if args.alpha is not None:
         config['agent_kwargs']['alpha'] = args.alpha
         exp_name = f"{exp_name}_a{args.alpha}"
+    if args.noise_scale is not None:
+        config['agent_kwargs']['noise_scale'] = args.noise_scale
+        exp_name = f"{exp_name}_ns{args.noise_scale}"
 
     setup_wandb(project='cs285_hw5', name=exp_name, group=args.run_group, config=config)
     args.save_dir = os.path.join(logdir_prefix, args.run_group, exp_name)
