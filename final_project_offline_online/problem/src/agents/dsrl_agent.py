@@ -64,6 +64,7 @@ class DSRLAgent(nn.Module):
         self.z_critic_optimizer = make_z_critic_optimizer(self.z_critic.parameters())
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=3e-4)
 
+        self.online_training = online_training
         self.to(ptu.device)
 
     @property
@@ -258,11 +259,15 @@ class DSRLAgent(nn.Module):
         dones: torch.Tensor,
         step: int,
     ):
-        # TODO(student): Update critic, z_critic, actor, noise actor, and alpha - feel free to modify this code according to your setup!
         z = torch.randn(observations.shape[0], self.action_dim, device=observations.device, dtype=observations.dtype)
         metrics_q = self.update_q(observations, actions, rewards, next_observations, dones)
         metrics_qz = self.update_qz(observations, actions, self.noise_scale * z)
-        metrics_actor = self.update_actor(observations, actions)
+        # During online training, freeze the BC flow actor so online data doesn't
+        # corrupt the behavior cloning learned from the offline dataset.
+        if not self.online_training:
+            metrics_actor = self.update_actor(observations, actions)
+        else:
+            metrics_actor = {}
         metrics_noise_actor = self.update_noise_actor(observations)
         metrics_alpha = self.update_alpha(observations)
         metrics = {

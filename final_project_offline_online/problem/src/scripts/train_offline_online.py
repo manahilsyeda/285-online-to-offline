@@ -16,14 +16,28 @@ from infrastructure.log_utils import setup_wandb, Logger, dump_log
 from infrastructure.replay_buffer import ReplayBuffer
 
 
-def replay_buffer_from_offline(offline: ReplayBuffer, capacity: int) -> ReplayBuffer:
+def replay_buffer_from_offline(
+    offline: ReplayBuffer,
+    capacity: int,
+    max_offline_transitions: Optional[int] = None,
+) -> ReplayBuffer:
     """
-    Copy a fixed offline dataset into a larger circular replay buffer so online RL can append
-    new transitions without dropping offline data until capacity is exceeded.
+    Copy (a subset of) a fixed offline dataset into a larger circular replay buffer so online RL
+    can append new transitions without dropping those copies until capacity is exceeded.
+
+    If max_offline_transitions is None or non-positive, copy the full offline dataset. Otherwise
+    copy min(n, max_offline_transitions) transitions sampled uniformly without replacement.
     """
     # TODO(student): Implement offline training loop
     n = offline.size
-    cap = max(int(capacity), n)
+    if max_offline_transitions is not None and max_offline_transitions > 0:
+        n_use = min(n, int(max_offline_transitions))
+        indices = np.random.choice(n, size=n_use, replace=False)
+    else:
+        n_use = n
+        indices = np.arange(n, dtype=np.int64)
+
+    cap = max(int(capacity), n_use)
     rb = ReplayBuffer(capacity=cap)
     rb.observations = np.empty((cap, *offline.observations.shape[1:]), dtype=offline.observations.dtype)
     rb.next_observations = np.empty(
@@ -32,12 +46,20 @@ def replay_buffer_from_offline(offline: ReplayBuffer, capacity: int) -> ReplayBu
     rb.actions = np.empty((cap, *offline.actions.shape[1:]), dtype=offline.actions.dtype)
     rb.rewards = np.empty((cap,) + offline.rewards.shape[1:], dtype=offline.rewards.dtype)
     rb.dones = np.empty((cap,) + offline.dones.shape[1:], dtype=offline.dones.dtype)
-    rb.observations[:n] = offline.observations[:n]
-    rb.next_observations[:n] = offline.next_observations[:n]
-    rb.actions[:n] = offline.actions[:n]
-    rb.rewards[:n] = offline.rewards[:n]
-    rb.dones[:n] = offline.dones[:n]
-    rb.size = n
+    
+    # rb.observations[:n] = offline.observations[:n]
+    # rb.next_observations[:n] = offline.next_observations[:n]
+    # rb.actions[:n] = offline.actions[:n]
+    # rb.rewards[:n] = offline.rewards[:n]
+    # rb.dones[:n] = offline.dones[:n]
+    # rb.size = n
+
+    rb.observations[:n_use] = offline.observations[indices]
+    rb.next_observations[:n_use] = offline.next_observations[indices]
+    rb.actions[:n_use] = offline.actions[indices]
+    rb.rewards[:n_use] = offline.rewards[indices]
+    rb.dones[:n_use] = offline.dones[indices]
+    rb.size = n_use
     return rb
 
 
@@ -135,7 +157,14 @@ def run_online_training_loop(
     ptu.init_gpu(use_gpu=not args.no_gpu, gpu_id=args.which_gpu)
 
     env, offline_dataset = config["make_env_and_dataset"]()
-    if replay_buffer is None:
+    # Optional cap on offline data in the buffer for online (handout 2.1); offline phase still trains on full data.
+    if args.offline_replay_size is not None:
+        replay_buffer = replay_buffer_from_offline(
+            offline_dataset,
+            args.replay_buffer_capacity,
+            max_offline_transitions=args.offline_replay_size,
+        )
+    elif replay_buffer is None:
         replay_buffer = replay_buffer_from_offline(offline_dataset, args.replay_buffer_capacity)
 
     example_batch = replay_buffer.sample(1)
@@ -174,7 +203,9 @@ def run_online_training_loop(
     for step in tqdm.trange(online_steps, dynamic_ncols=True):
         global_step = start_step + step
 
-        if replay_buffer.size >= config["batch_size"]:
+        # WSRL: skip policy gradients until step >= wsrl_steps (still collect env transitions below)
+        # if replay_buffer.size >= config["batch_size"]:
+        if replay_buffer.size >= config["batch_size"] and step >= args.wsrl_steps:
             batch = replay_buffer.sample(config["batch_size"])
             batch = {k: ptu.from_numpy(v) if isinstance(v, np.ndarray) else v for k, v in batch.items()}
             metrics = agent.update(
@@ -236,10 +267,23 @@ def setup_arguments(args=None):
     
     # Online retention of offline data
     # TODO(student): If desired, add arguments for online retention of offline data
-    
-    # WSRL
+    # Online retention of offline data (subset at start of online phase; None = keep full offline set)
+    parser.add_argument(
+        "--offline_replay_size",
+        type=int,
+        default=None,
+        help="Max offline transitions to load into the replay buffer when online starts "
+        "(random subset). None = use all offline data. Offline RL still uses the full dataset.",
+    )
+
     # TODO (student): If desired, add arguments for WSRL
-    
+    # WSRL (Warm-start RL): collect rollouts without policy updates for the first N online steps
+    parser.add_argument(
+        "--wsrl_steps",
+        type=int,
+        default=0,
+        help="Online steps to run before starting policy updates (0 = disabled).",
+    )
 
     # IFQL
     parser.add_argument("--expectile", type=float, default=None)
@@ -279,6 +323,8 @@ def main(args):
     config['replay_buffer_capacity'] = args.replay_buffer_capacity
     
     # TODO(student): If necessary, add additional config values
+    config['wsrl_steps'] = args.wsrl_steps
+    config['offline_replay_size'] = args.offline_replay_size
 
     exp_name = f"sd{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{config['log_name']}"
 
@@ -299,6 +345,10 @@ def main(args):
         exp_name = f"{exp_name}_online"
     if args.offline_training_steps > 0:
         exp_name = f"{exp_name}_offline"
+    if args.wsrl_steps > 0:
+        exp_name = f"{exp_name}_wsrl{args.wsrl_steps}"
+    if args.offline_replay_size is not None:
+        exp_name = f"{exp_name}_offrep{args.offline_replay_size}"
 
     setup_wandb(project='cs185_default_project', name=exp_name, group=args.run_group, config=config)
     args.save_dir = os.path.join(logdir_prefix, args.run_group, exp_name)
