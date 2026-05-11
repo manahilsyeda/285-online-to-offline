@@ -183,7 +183,7 @@ def run_online_training_loop(
                 batch["rewards"],
                 batch["next_observations"],
                 batch["dones"],
-                step,
+                global_step,
             )
             if (step + 1) % args.log_interval == 0:
                 train_logger.log(metrics, step=global_step)
